@@ -771,25 +771,83 @@ Dengan menggunakan Laravel Sanctum, API tidak bisa diakses tanpa melalui Login a
 	```
 	composer require laravel/sanctum
 	php artisan vendor:publish --provider="Laravel\Sanctum\SanctumServiceProvider"
-	php artisan migrate
+	php artisan migrate atau php artisan migrate:fresh
 	```
 	Penjelasan singkat:
 	* composer require → memasang paket Sanctum.
 	* vendor:publish → menyalin file konfigurasi (config/sanctum.php) & migration yang diperlukan.
 	* migrate → membuat tabel personal_access_tokens yang dipakai Sanctum untuk menyimpan token.
+	* fresh → kalau kamu pernah error table already exists
+<br>
+2. Ubah model User
+	Buka file `app/Models/User.php`
+	Tambahkan trait Sanctum:
+	```
+	use Laravel\Sanctum\HasApiTokens;
 
-2. Kernel — tambahkan middleware untuk SPA stateful requests
-	Buka `app/Http/Kernel.php` dan temukan array `'api' => [...]`. Pastikan urutannya minimal seperti ini:
+	class User extends Authenticatable
+	{
+	    use HasApiTokens, HasFactory, Notifiable;
+	}
 	```
-	'api' => [
-		\Laravel\Sanctum\Http\Middleware\EnsureFrontendRequestsAreStateful::class,
-		'throttle:api',
-		\Illuminate\Routing\Middleware\SubstituteBindings::class,
-	],
+	> Artinya: setiap user bisa memiliki token API sendiri, disimpan di tabel `personal_access_tokens`
+
+3. Konfigurasi Sanctum & CORS di `bootstrap/app.php`. Laravel 12 tidak punya `Kernel.php` atau `config/cors.php`, jadi semua konfigurasi kita taruh di `bootstrap/app.php`. Buka `backend/bootstrap/app.php`, isi atau ubah jadi seperti ini :
 	```
-	Penjelasan:
-	* EnsureFrontendRequestsAreStateful — diperlukan ketika front-end SPA (mis. di localhost:5173) berinteraksi memakai cookie-based auth atau agar Sanctum mengenali domain stateful.
-	* throttle:api — pembatasan rate default.
-	* SubstituteBindings — menggantikan route model binding.
-	
-	Jika sudah ada baris-baris ini, lewati.
+	<?php
+
+	use Illuminate\Foundation\Application;
+	use Illuminate\Foundation\Configuration\Middleware;
+	use Illuminate\Http\Middleware\HandleCors;
+	use Laravel\Sanctum\Http\Middleware\EnsureFrontendRequestsAreStateful;
+	use Illuminate\Support\Facades\Config;
+
+	Config::set('cors', [
+		'paths' => ['api/*', 'sanctum/csrf-cookie'],
+		'allowed_methods' => ['*'],
+		'allowed_origins' => ['http://localhost:5173'], // alamat frontend VueJS
+		'allowed_headers' => ['*'],
+		'supports_credentials' => true,
+	]);
+
+	return Application::configure(basePath: dirname(__DIR__))
+		->withRouting(
+			web: __DIR__ . '/../routes/web.php',
+			api: __DIR__ . '/../routes/api.php',
+			commands: __DIR__ . '/../routes/console.php',
+			health: '/up',
+		)
+		->withMiddleware(function (Middleware $middleware) {
+			// aktifkan CORS
+			$middleware->append(HandleCors::class);
+
+			// aktifkan Sanctum stateful middleware untuk SPA (VueJS)
+			$middleware->statefulApi()
+				->prepend(EnsureFrontendRequestsAreStateful::class);
+		})
+		->create();
+	```
+
+	Penjelasan singkat:
+	> * HandleCors → mengatur domain mana yang boleh akses API.
+	> * EnsureFrontendRequestsAreStateful → memungkinkan VueJS login menggunakan cookie / token.
+	> * statefulApi() → menandakan API tetap ingat session (bukan stateless).
+
+4. Buat route login dan register, edit `routes/api.php` :
+	```
+	use App\Http\Controllers\AuthController;
+	use App\Http\Controllers\ProductController;
+	use Illuminate\Support\Facades\Route;
+
+	// Route publik
+	Route::post('/register', [AuthController::class, 'register']);
+	Route::post('/login', [AuthController::class, 'login']);
+
+	// Route yang butuh autentikasi
+	Route::middleware('auth:sanctum')->group(function () {
+		Route::apiResource('products', ProductController::class);
+		Route::post('/logout', [AuthController::class, 'logout']);
+	});
+	```
+
+CATATAN SAMPAI SINI
